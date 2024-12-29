@@ -109,7 +109,7 @@ def update_csv(update_df: pd.DataFrame = None, current_file: str = None) -> None
 
 
 def full_load(
-    path: str = "data/homeHarvest/",
+    path: str = "data/",
     years: list = ["2020", "2021", "2022", "2023", "2024"],
 ) -> None:
     # Input Variables
@@ -180,7 +180,7 @@ def full_load(
                         sold = pd.concat([sold, df])
 
                     if not sold.empty:
-                        current_file = f"{path}HomeHarvest_{location_prefix}_{quarter}_{year}_sold.csv"
+                        current_file = f"{path}{location_prefix}_{quarter}_{year}_sold.csv"
                         update_csv(update_df=sold, current_file=current_file)
                     del sold
 
@@ -210,7 +210,7 @@ def full_load(
                         selling = pd.concat([selling, df])
 
                     if not selling.empty:
-                        current_file = f"{path}HomeHarvest_{location_prefix}_{quarter}_{year}_selling.csv"
+                        current_file = f"{path}{location_prefix}_{quarter}_{year}_selling.csv"
                         update_csv(update_df=selling, current_file=current_file)
                     del selling
 
@@ -240,7 +240,7 @@ def full_load(
                         renting = pd.concat([renting, df])
 
                     if not renting.empty:
-                        current_file = f"{path}HomeHarvest_{location_prefix}_{quarter}_{year}_renting.csv"
+                        current_file = f"{path}{location_prefix}_{quarter}_{year}_renting.csv"
                         update_csv(update_df=renting, current_file=current_file)
                     del renting
 
@@ -270,7 +270,7 @@ def full_load(
                         pending = pd.concat([pending, df])
 
                     if not pending.empty:
-                        current_file = f"{path}HomeHarvest_{location_prefix}_{quarter}_{year}_pending.csv"
+                        current_file = f"{path}{location_prefix}_{quarter}_{year}_pending.csv"
                         update_csv(update_df=pending, current_file=current_file)
                     del pending
 
@@ -291,7 +291,7 @@ def full_load(
 
 
 def main():
-    input_path = "/Users/rudynavarro/code/investing/data/homeHarvest/"
+    input_path = "~/code/rentinvest/data/"
     file_types = ["sold", "selling", "pending", "renting"]
 
     ## Extract data from API
@@ -305,7 +305,7 @@ def main():
         )
 
         # Load type data to postgres table
-        # exec(f"bulk_load_postgres(table='{extract_type}', input_file=full_{extract_type}_file, ref_sql='DML/bulk_load_home_harvest.sql')")
+        exec(f"bulk_load_postgres(table='{extract_type}', input_file=full_{extract_type}_file, ref_sql='DML/bulk_load_home_harvest.sql')")
 
 
 if __name__ == "__main__":
