@@ -2,20 +2,21 @@ import logging
 import os
 import time
 from glob import glob
-
+from typing import List, Tuple
 import pandas as pd
 import psycopg2
 import requests
 from homeharvest import scrape_property
 
-logging.basicConfig(level=logging.INFO)
+format = '[%(asctime)s] {%(pathname)s:%(lineno)d} %(levelname)s - %(message)s'
+logging.basicConfig(level=logging.INFO, format=format)
 
 
 def condense_files(input_path: str = None, filter_str: str = None) -> str:
     logging.info(f"Condensing {filter_str} files in {input_path}")
 
     # Find all CSV files in the directory
-    filter_path = input_path + f"*{filter_str}.csv"
+    filter_path = input_path.replace('~',os.path.expanduser('~')) + f"*{filter_str}.csv"
     csv_files = glob(filter_path)
 
     logging.info(f"Filter path: {filter_path}")
@@ -53,18 +54,22 @@ def condense_files(input_path: str = None, filter_str: str = None) -> str:
         "alt_photos": "str",
     }
 
-    df_concat = pd.concat(
-        [pd.read_csv(f, index_col=0) for f in csv_files], ignore_index=False
-    )
+    output_file = ""
+    try:
+        dirname = os.path.dirname(csv_files[0])
+        basename = os.path.basename(csv_files[0])
+        new_basename = "_".join(basename.split("_")[0:1]) + f"_{filter_str}_full.csv"
 
-    dirname = os.path.dirname(csv_files[0])
-    basename = os.path.basename(csv_files[0])
-    new_basename = "_".join(basename.split("_")[0:1]) + f"_{filter_str}_full.csv"
-
-    output_file = dirname + "/" + new_basename
-    df_concat.to_csv(output_file)
-
-    logging.info(f"Created {filter_str} condensed file: {output_file}")
+        output_file = dirname + "/" + new_basename
+        df_concat = pd.concat(
+            [pd.read_csv(f, index_col=0) for f in csv_files], ignore_index=False
+        )
+        df_concat.to_csv(output_file)
+        logging.info(f"Created {filter_str} condensed file: {output_file}")
+    except IndexError:
+        logging.error(f"No csv files found for filter: {filter_path}")
+    except ValueError:
+        logging.error(f"No values found for filter: {filter_path}")
 
     return output_file
 
@@ -99,25 +104,50 @@ def bulk_load_postgres(
 
 
 def update_csv(update_df: pd.DataFrame = None, current_file: str = None) -> None:
+    current_file = current_file.replace('~',os.path.expanduser('~')) 
     if os.path.exists(current_file):
         current = pd.read_csv(current_file, header=0, index_col=False)
-        df_concat = pd.concat([current, update_df], ignore_index=False)
+        df_concat = pd.concat([current, update_df], ignore_index=False).drop_duplicates()
         df_concat.to_csv(current_file, index=False)
     else:
         logging.debug(f"Could not find preexisting file: {current_file}")
         update_df.to_csv(current_file, index=False)
 
 
+def split_extra_columns(
+    df: pd.DataFrame = None, 
+    index_col: List[str] = ["property_url"], 
+    split_csv: str = "", 
+    columns: List[str] = ["primary_photo","alt_photos"]
+) -> Tuple:
+    
+    all_col = index_col + columns
+    extra = df[all_col].copy(deep=True)
+    out_df = df.drop(columns=columns).copy(deep=True)
+
+    # extra.set_index(index_col, inplace=True)
+    # out_df.set_index(index_col, inplace=True)
+
+    if split_csv:
+        update_csv(update_df=extra, current_file=split_csv)
+
+    return out_df, extra
+
 def full_load(
     path: str = "data/",
     years: list = ["2020", "2021", "2022", "2023", "2024"],
+    quarters: List[str] = ["Q1", "Q2", "Q3", "Q4"],
+    location_prefix: str = None,
+    locations: List[str] = None,
+    radius: int = 100,
 ) -> None:
     # Input Variables
     radius = 100
-    quarters = ["Q1", "Q2", "Q3", "Q4"]
+    split_csv = f"{path}{location_prefix}_photos.csv"
 
-    for idx, year in enumerate(years):
+    for _, year in enumerate(years):
         for quarter in quarters:
+            logging.debug(f"Processing quarter: {quarter}")
             if quarter == "Q1":
                 date_from = f"{year}-01-01"
                 date_to = f"{year}-03-31"
@@ -133,25 +163,7 @@ def full_load(
             else:
                 logging.error(f"Unable to process quarter: {quarter}")
 
-            location_prefix = "OKC"
-            locations = [
-                "Oklahoma City, OK",
-                "Seward, OK",
-                "Guthrie, OK",
-                "Edmond, OK",
-                "Norman, OK",
-                "Moore, OK",
-                "Yukon, OK",
-                "Perry, OK",
-                "Stillwater, OK",
-                "Perkins, OK",
-                "Langston, OK",
-                "Hennessey, OK",
-                "Kingfisher, OK",
-            ]
-            # for location in locations:
-            while locations:
-                location = locations[0]
+            for location in locations:
                 logging.info(f"Processing {location} for {quarter}_{year}")
                 try:
                     ## Process Sold Properties
@@ -163,9 +175,6 @@ def full_load(
                             date_from=date_from,
                             date_to=date_to,
                         )
-                        logging.info(
-                            f"Number of sold properties in {location} {quarter}_{year}: {len(sold)}"
-                        )
                     else:
                         df = scrape_property(
                             radius=radius,
@@ -174,15 +183,12 @@ def full_load(
                             date_from=date_from,
                             date_to=date_to,
                         )
-                        logging.info(
-                            f"Number of sold properties in {location} {quarter}_{year}: {len(df)}"
-                        )
                         sold = pd.concat([sold, df])
 
                     if not sold.empty:
+                        sold,_ = split_extra_columns(df=sold, split_csv=split_csv)
                         current_file = f"{path}{location_prefix}_{quarter}_{year}_sold.csv"
                         update_csv(update_df=sold, current_file=current_file)
-                    del sold
 
                     ## Process Selling Properties
                     if "selling" not in locals():
@@ -193,9 +199,6 @@ def full_load(
                             date_from=date_from,
                             date_to=date_to,
                         )
-                        logging.info(
-                            f"Number of selling properties in {location} {quarter}_{year}: {len(selling)}"
-                        )
                     else:
                         df = scrape_property(
                             radius=radius,
@@ -204,15 +207,12 @@ def full_load(
                             date_from=date_from,
                             date_to=date_to,
                         )
-                        logging.info(
-                            f"Number of selling properties in {location} {quarter}_{year}: {len(df)}"
-                        )
                         selling = pd.concat([selling, df])
 
                     if not selling.empty:
+                        selling,_ = split_extra_columns(df=selling, split_csv=split_csv)
                         current_file = f"{path}{location_prefix}_{quarter}_{year}_selling.csv"
                         update_csv(update_df=selling, current_file=current_file)
-                    del selling
 
                     ## Process Renting Properties
                     if "renting" not in locals():
@@ -223,9 +223,6 @@ def full_load(
                             date_from=date_from,
                             date_to=date_to,
                         )
-                        logging.info(
-                            f"Number of renting properties in {location} {quarter}_{year}: {len(renting)}"
-                        )
                     else:
                         df = scrape_property(
                             radius=radius,
@@ -234,15 +231,12 @@ def full_load(
                             date_from=date_from,
                             date_to=date_to,
                         )
-                        logging.info(
-                            f"Number of renting properties in {location} {quarter}_{year}: {len(df)}"
-                        )
                         renting = pd.concat([renting, df])
 
                     if not renting.empty:
+                        renting,_ = split_extra_columns(df=renting, split_csv=split_csv)
                         current_file = f"{path}{location_prefix}_{quarter}_{year}_renting.csv"
                         update_csv(update_df=renting, current_file=current_file)
-                    del renting
 
                     ## Process Pending Properties
                     if "pending" not in locals():
@@ -253,9 +247,6 @@ def full_load(
                             date_from=date_from,
                             date_to=date_to,
                         )
-                        logging.info(
-                            f"Number of pending properties in {location} {quarter}_{year}: {len(pending)}"
-                        )
                     else:
                         df = scrape_property(
                             radius=radius,
@@ -264,15 +255,12 @@ def full_load(
                             date_from=date_from,
                             date_to=date_to,
                         )
-                        logging.info(
-                            f"Number of pending properties in {location} {quarter}_{year}: {len(df)}"
-                        )
                         pending = pd.concat([pending, df])
 
                     if not pending.empty:
+                        pending,_ = split_extra_columns(df=pending, split_csv=split_csv)
                         current_file = f"{path}{location_prefix}_{quarter}_{year}_pending.csv"
                         update_csv(update_df=pending, current_file=current_file)
-                    del pending
 
                 except AttributeError as e:
                     logging.error(e)
@@ -283,19 +271,39 @@ def full_load(
                 except Exception as e:
                     logging.error(e)
                 finally:
-                    # del sold, selling, renting, pending
-                    locations.remove(location)
                     logging.info(
-                        f"COMPLETED processing {location} for {quarter}_{year}"
+                        f"COMPLETED processing {location} for {quarter}_{year} - Sold: {len(sold)}, Selling: {len(selling)}, Pending: {len(pending)}, Renting: {len(renting)}"
                     )
+                    del sold, selling, renting, pending
 
 
 def main():
     input_path = "~/code/rentinvest/data/"
     file_types = ["sold", "selling", "pending", "renting"]
+    locations = [
+        "Oklahoma City, OK",
+        "Seward, OK",
+        "Guthrie, OK",
+        "Edmond, OK",
+        "Norman, OK",
+        "Moore, OK",
+        "Yukon, OK",
+        "Perry, OK",
+        "Stillwater, OK",
+        "Perkins, OK",
+        "Langston, OK",
+        "Hennessey, OK",
+        "Kingfisher, OK",
+    ]
 
     ## Extract data from API
-    full_load(path=input_path, years=["2020", "2021", "2022", "2023", "2024"])
+    full_load(
+        path=input_path, 
+        years=["2020", "2021", "2022", "2023", "2024"],
+        quarters=["Q1", "Q2", "Q3", "Q4"],
+        location_prefix="OKC",
+        locations=locations,   
+    )
 
     ## Transform / Load Data
     for extract_type in file_types:
@@ -305,7 +313,7 @@ def main():
         )
 
         # Load type data to postgres table
-        exec(f"bulk_load_postgres(table='{extract_type}', input_file=full_{extract_type}_file, ref_sql='DML/bulk_load_home_harvest.sql')")
+        # exec(f"bulk_load_postgres(table='{extract_type}', input_file=full_{extract_type}_file, ref_sql='DML/bulk_load_home_harvest.sql')")
 
 
 if __name__ == "__main__":
