@@ -74,17 +74,106 @@ def condense_files(input_path: str = None, filter_str: str = None) -> str:
     return output_file
 
 
+def get_or_create_status(conn, status_name: str) -> int:
+    """Get or create a status record and return its ID"""
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO property_status (status_name) 
+        VALUES (%s) 
+        ON CONFLICT (status_name) DO NOTHING 
+        RETURNING status_id
+    """, (status_name,))
+    result = cur.fetchone()
+    if result:
+        return result[0]
+    cur.execute("SELECT status_id FROM property_status WHERE status_name = %s", (status_name,))
+    return cur.fetchone()[0]
+
+def get_or_create_style(conn, style_name: str) -> int:
+    """Get or create a style record and return its ID"""
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO property_style (style_name) 
+        VALUES (%s) 
+        ON CONFLICT (style_name) DO NOTHING 
+        RETURNING style_id
+    """, (style_name,))
+    result = cur.fetchone()
+    if result:
+        return result[0]
+    cur.execute("SELECT style_id FROM property_style WHERE style_name = %s", (style_name,))
+    return cur.fetchone()[0]
+
+def get_or_create_location(conn, city: str, state: str, zip_code: str) -> int:
+    """Get or create a location record and return its ID"""
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO locations (city, state, zip_code) 
+        VALUES (%s, %s, %s) 
+        ON CONFLICT (city, state, zip_code) DO NOTHING 
+        RETURNING location_id
+    """, (city, state, zip_code))
+    result = cur.fetchone()
+    if result:
+        return result[0]
+    cur.execute("""
+        SELECT location_id FROM locations 
+        WHERE city = %s AND state = %s AND zip_code = %s
+    """, (city, state, zip_code))
+    return cur.fetchone()[0]
+
+def process_property_data(df: pd.DataFrame, conn) -> pd.DataFrame:
+    """Process property data to match the new schema"""
+    processed_data = []
+    
+    for _, row in df.iterrows():
+        # Get or create related IDs
+        status_id = get_or_create_status(conn, row['status'])
+        style_id = get_or_create_style(conn, row['style'])
+        location_id = get_or_create_location(conn, row['city'], row['state'], row['zip_code'])
+        
+        # Create processed row
+        processed_row = {
+            'property_url': row['property_url'],
+            'mls': row['mls'],
+            'mls_id': row['mls_id'],
+            'status_id': status_id,
+            'style_id': style_id,
+            'street': row['street'],
+            'unit': row['unit'],
+            'location_id': location_id,
+            'beds': row['beds'],
+            'full_baths': row['full_baths'],
+            'half_baths': row['half_baths'],
+            'sqft': row['sqft'],
+            'year_built': row['year_built'],
+            'days_on_mls': row['days_on_mls'],
+            'list_price': row['list_price'],
+            'list_date': row['list_date'],
+            'sold_price': row['sold_price'],
+            'last_sold_date': row['last_sold_date'],
+            'lot_sqft': row['lot_sqft'],
+            'price_per_sqft': row['price_per_sqft'],
+            'latitude': row['latitude'],
+            'longitude': row['longitude'],
+            'stories': row['stories'],
+            'hoa_fee': row['hoa_fee'],
+            'parking_garage': row['parking_garage'],
+            'primary_photo': row['primary_photo'],
+            'alt_photos': row['alt_photos']
+        }
+        processed_data.append(processed_row)
+    
+    return pd.DataFrame(processed_data)
+
 def bulk_load_postgres(
-    table: str = None,
     input_file: str = None,
     ref_sql: str = "DML/bulk_load_home_harvest.sql",
 ) -> None:
     # Read in DML file
     with open(ref_sql) as myfile:
         raw_query = " \n".join(line.rstrip() for line in myfile)
-    upload_query = raw_query.format(table=table, filepath=input_file)
-    logging.info(f"upload query: {upload_query}")
-
+    
     # Establish connection
     conn = psycopg2.connect(
         database="homeharvest",
@@ -94,13 +183,62 @@ def bulk_load_postgres(
         port="5432",
     )
 
-    # Execute Query
-    cur = conn.cursor()
-    cur.execute(upload_query)
-
-    # Close cursor and connection
-    cur.close()
-    conn.close()
+    try:
+        # Read and process the CSV file
+        df = pd.read_csv(input_file)
+        processed_df = process_property_data(df, conn)
+        
+        # Create a temporary table for bulk loading
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TEMP TABLE temp_properties (
+                LIKE properties INCLUDING DEFAULTS
+            ) ON COMMIT DROP
+        """)
+        
+        # Copy data to temporary table
+        processed_df.to_sql('temp_properties', conn, if_exists='append', index=False)
+        
+        # Insert from temporary table to main table
+        cur.execute("""
+            INSERT INTO properties
+            SELECT * FROM temp_properties
+            ON CONFLICT (property_url, mls_id) DO UPDATE SET
+                status_id = EXCLUDED.status_id,
+                style_id = EXCLUDED.style_id,
+                street = EXCLUDED.street,
+                unit = EXCLUDED.unit,
+                location_id = EXCLUDED.location_id,
+                beds = EXCLUDED.beds,
+                full_baths = EXCLUDED.full_baths,
+                half_baths = EXCLUDED.half_baths,
+                sqft = EXCLUDED.sqft,
+                year_built = EXCLUDED.year_built,
+                days_on_mls = EXCLUDED.days_on_mls,
+                list_price = EXCLUDED.list_price,
+                list_date = EXCLUDED.list_date,
+                sold_price = EXCLUDED.sold_price,
+                last_sold_date = EXCLUDED.last_sold_date,
+                lot_sqft = EXCLUDED.lot_sqft,
+                price_per_sqft = EXCLUDED.price_per_sqft,
+                latitude = EXCLUDED.latitude,
+                longitude = EXCLUDED.longitude,
+                stories = EXCLUDED.stories,
+                hoa_fee = EXCLUDED.hoa_fee,
+                parking_garage = EXCLUDED.parking_garage,
+                primary_photo = EXCLUDED.primary_photo,
+                alt_photos = EXCLUDED.alt_photos,
+                updated_at = CURRENT_TIMESTAMP
+        """)
+        
+        conn.commit()
+        
+    except Exception as e:
+        conn.rollback()
+        logging.error(f"Error during bulk load: {e}")
+        raise
+    finally:
+        conn.close()
 
 
 def update_csv(update_df: pd.DataFrame = None, current_file: str = None) -> None:
@@ -308,12 +446,11 @@ def main():
     ## Transform / Load Data
     for extract_type in file_types:
         # Generate a single file for each type
-        exec(
-            f"full_{extract_type}_file = condense_files(input_path=input_path, filter_str='{extract_type}')"
-        )
-
-        # Load type data to postgres table
-        # exec(f"bulk_load_postgres(table='{extract_type}', input_file=full_{extract_type}_file, ref_sql='DML/bulk_load_home_harvest.sql')")
+        full_file = condense_files(input_path=input_path, filter_str=extract_type)
+        
+        # Load data to postgres table
+        if full_file:
+            bulk_load_postgres(input_file=full_file)
 
 
 if __name__ == "__main__":
